@@ -112,25 +112,48 @@ def check_gpu():
 def load_model(model_id, quantization_bits=4, device="auto", torch_dtype="float16"):
     """
     Load any Hugging Face model with optimal settings.
-    
+
     Args:
         model_id: Hugging Face model ID (e.g., "gpt2", "meta-llama/Llama-2-7b")
         quantization_bits: Quantization level (4 or 8, 0 for none)
         device: Device to load on ("auto", "cuda", "cpu")
         torch_dtype: Precision type ("float32", "float16", "bfloat16")
-    
+
     Returns:
         tuple: (model, tokenizer)
+
+    Raises:
+        ModelNotFoundError: If the model ID doesn't exist on Hugging Face Hub
+        NetworkError: If there's a network connectivity issue
+        AuthenticationError: If authentication is required but not provided
+        ModelLoadError: If model loading fails for other reasons
     """
     import torch
     from transformers import (
-        AutoTokenizer, 
-        AutoModelForCausalLM, 
+        AutoTokenizer,
+        AutoModelForCausalLM,
         BitsAndBytesConfig
     )
-    
+
+    # Custom exception classes for better error handling
+    class ModelLoadError(Exception):
+        """Raised when model loading fails for an unexpected reason"""
+        pass
+
+    class ModelNotFoundError(Exception):
+        """Raised when the model ID doesn't exist"""
+        pass
+
+    class NetworkError(Exception):
+        """Raised when there's a network connectivity issue"""
+        pass
+
+    class AuthenticationError(Exception):
+        """Raised when authentication is required but not provided"""
+        pass
+
     print(f"Loading {model_id}...")
-    
+
     # Map dtype string to torch dtype
     dtype_map = {
         "float32": torch.float32,
@@ -138,17 +161,48 @@ def load_model(model_id, quantization_bits=4, device="auto", torch_dtype="float1
         "bfloat16": torch.bfloat16
     }
     torch_dtype_obj = dtype_map.get(torch_dtype, torch.float16)
-    
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    print("✓ Tokenizer loaded")
-    
+
+    # Load tokenizer with error handling
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        print("✓ Tokenizer loaded")
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "404" in str(e) or "not found" in error_msg:
+            raise ModelNotFoundError(
+                f"Model '{model_id}' not found on Hugging Face Hub.\n"
+                f"Tips:\n"
+                f"  - Check the model ID is correct\n"
+                f"  - Verify the model exists at: https://huggingface.co/models\n"
+                f"  - Some models require authentication (use HF_TOKEN)"
+            ) from e
+        elif "connection" in error_msg or "network" in error_msg or "timeout" in error_msg:
+            raise NetworkError(
+                f"Network error while downloading tokenizer for '{model_id}'.\n"
+                f"Tips:\n"
+                f"  - Check your internet connection\n"
+                f"  - Try again in a few moments\n"
+                f"  - Increase timeout: HF_HUB_DOWNLOAD_TIMEOUT=600"
+            ) from e
+        elif "token" in error_msg or "auth" in error_msg or "permission" in error_msg:
+            raise AuthenticationError(
+                f"Authentication required for model '{model_id}'.\n"
+                f"Tips:\n"
+                f"  - Set your Hugging Face token: os.environ['HF_TOKEN'] = 'your_token'\n"
+                f"  - Get a token at: https://huggingface.co/settings/tokens"
+            ) from e
+        else:
+            raise ModelLoadError(
+                f"Failed to load tokenizer for '{model_id}': {e}\n"
+                f"Please check the model ID and try again."
+            ) from e
+
     # Configure model loading
     model_kwargs = {
         "device_map": device,
         "torch_dtype": torch_dtype_obj
     }
-    
+
     # Add quantization if enabled
     if quantization_bits in [4, 8] and torch.cuda.is_available():
         print(f"→ Using {quantization_bits}-bit quantization")
@@ -160,13 +214,51 @@ def load_model(model_id, quantization_bits=4, device="auto", torch_dtype="float1
             bnb_4bit_quant_type="nf4"
         )
         model_kwargs["quantization_config"] = bnb_config
-    
-    # Load model
-    model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
-    model.eval()
-    
+
+    # Load model with error handling
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
+        model.eval()
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "404" in str(e) or "not found" in error_msg:
+            raise ModelNotFoundError(
+                f"Model '{model_id}' not found on Hugging Face Hub.\n"
+                f"Tips:\n"
+                f"  - Check the model ID is correct\n"
+                f"  - Verify the model exists at: https://huggingface.co/models"
+            ) from e
+        elif "connection" in error_msg or "network" in error_msg or "timeout" in error_msg:
+            raise NetworkError(
+                f"Network error while downloading model '{model_id}'.\n"
+                f"Tips:\n"
+                f"  - Check your internet connection\n"
+                f"  - Increase timeout: HF_HUB_DOWNLOAD_TIMEOUT=600\n"
+                f"  - Try a smaller model if network is slow"
+            ) from e
+        elif "token" in error_msg or "auth" in error_msg or "permission" in error_msg:
+            raise AuthenticationError(
+                f"Authentication required for model '{model_id}'.\n"
+                f"Tips:\n"
+                f"  - Set your Hugging Face token: os.environ['HF_TOKEN'] = 'your_token'\n"
+                f"  - Get a token at: https://huggingface.co/settings/tokens"
+            ) from e
+        elif "memory" in error_msg or "cuda" in error_msg or "oom" in error_msg:
+            raise ModelLoadError(
+                f"Not enough memory to load model '{model_id}'.\n"
+                f"Tips:\n"
+                f"  - Use smaller model or higher quantization (4-bit)\n"
+                f"  - Clear GPU memory: torch.cuda.empty_cache()\n"
+                f"  - Reduce batch size if using custom code"
+            ) from e
+        else:
+            raise ModelLoadError(
+                f"Failed to load model '{model_id}': {e}\n"
+                f"Please check the model ID and try again."
+            ) from e
+
     print(f"✓ Model loaded: {model.num_parameters():,} parameters")
-    
+
     return model, tokenizer
 
 
@@ -311,13 +403,18 @@ def quick_start(model_id, quantization_bits=4):
 # Export for easy import
 __all__ = [
     "setup_environment",
-    "install_dependencies", 
+    "install_dependencies",
     "check_gpu",
     "load_model",
     "generate",
     "chat",
     "secure_cleanup",
-    "quick_start"
+    "quick_start",
+    # Exception classes for error handling
+    "ModelLoadError",
+    "ModelNotFoundError",
+    "NetworkError",
+    "AuthenticationError"
 ]
 
 
